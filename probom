@@ -1,0 +1,488 @@
+public void exe()
+{
+   String message="";
+   String startDateStr ="";
+   String endDateStr ="";
+   K3ResultBo resultBo = null;
+   try {
+      String siteFlag=k3UtilService.getSiteFlag();
+      Map<String,String> reusltMap=k3UtilService.changeOrCreateRecordTime("同步产品BOM");
+      startDateStr = reusltMap.get("startDateStr");
+      endDateStr = reusltMap.get("endDateStr");
+      
+      String userName = iSysParamManager.getClientParamValByCode("ERP_USER");
+      String passWord = iSysParamManager.getClientParamValByCode("ERP_PASSWORD");
+      if(StringUtils.isEmpty(userName)&&StringUtils.isEmpty(passWord))
+      {
+         throw new MestarException("请在客户端参数维护金蝶的账号[ERP_USER]密码[ERP_PASSWORD]!");
+      }
+      String erpUrl=k3UtilService.getErpUrl();
+      MestarLogger.info("调用金蝶Bom接口:参数"+startDateStr+"至"+endDateStr+"开始时间:"+new Date());
+      resultBo=querProduBomFormK3(userName, passWord, startDateStr, endDateStr, siteFlag,erpUrl);
+      MestarLogger.info("调用金蝶Bom接口:参数"+startDateStr+"至"+endDateStr+"开始时间:"+new Date()+":"+JSON.toJSONString(resultBo));
+      if("-1".equals(resultBo.getSTATUS()))
+      {
+         throw new MestarException("接口查询失败:"+resultBo.getINFO());
+      }else{
+         if(StringUtils.isEmpty(resultBo.getRESULT()))
+         {
+            //没有数据直接执行完
+            message="所选时间段没有查询到数据!";
+            k3UtilService.saveExceptionMessage("K3MbbProduBomService","exe","MES-K3产品BOM",
+                  resultBo.getRESULT()==null?"":resultBo.getRESULT(),new Date(),message,0);
+            return;
+         }
+      }
+      //调用成功
+      BomK3Wise wise=null;
+      try {
+         wise=XmlToBoUtil.xmlToBean(resultBo.getRESULT(), BomK3Wise.class);
+      } catch (Exception e) {
+         throw new MestarException("解析xml异常!"+e.getMessage());
+      }
+      try {
+         dealWithData(wise.getBillinfo(),"1");
+      } catch (Exception e) {
+         throw new MestarException("处理数据异常!"+e.getMessage());
+      }
+   } catch (Exception e) {
+      message=e.getMessage();
+      throw new MestarException(e.getMessage());
+   } finally {
+      k3UtilService.saveRecord("同步产品BOM", message,resultBo,startDateStr,endDateStr);
+      if(StringUtils.isNotEmpty(message)){
+         k3UtilService.saveExceptionMessage("K3MbbProduBomService","exe","MES-K3产品BOM",
+               resultBo==null?"":resultBo.getRESULT(),new Date(),message,1);
+      }else{
+         k3UtilService.saveExceptionMessage("K3MbbProduBomService","exe","MES-K3产品BOM",
+               resultBo==null?"":resultBo.getRESULT(),new Date(),"sccuess",0);
+      }
+   }
+}
+
+
+private void dealWithData(List<BomBillInfo> boList,String siteFlag)
+{
+   String hqlForSite="from PmbfSite t where 1314=1314 and  t.isDelete=0 and t.code=? ";
+   List<PmbfSite> siteList=new ArrayList<PmbfSite>();
+   if("1".equals(siteFlag))
+   {
+      //上海
+      siteList=this.dao.getCurrentSession().createQuery(hqlForSite)
+      .setParameter(0,"SATEE").list();
+   }else{
+      //成都
+      siteList=this.dao.getCurrentSession().createQuery(hqlForSite)
+      .setParameter(0,"CATEE").list();
+   }
+   if(siteList.size()!=1)
+   {
+      throw new MestarException("工厂编码填写错误,请联系管理员!");
+   }
+   PmbfSite site=siteList.get(0);
+   //批量查询物料
+   //构成map即可
+   List<String> erpIdList=new ArrayList<String>();
+   List<String> ignoreList=new ArrayList<String>();
+   for(BomBillInfo bo:boList)
+   {
+      //bom的内码
+      if(bo.getEntityData()==null)
+      {
+         ignoreList.add(bo.getFbomnumber());
+         continue;
+      }
+      List<BomEntityinfo> infoList=bo.getEntityData().getEntityinfo();
+      for(BomEntityinfo info:infoList)
+      {
+         if(!erpIdList.contains(info.getFitemid()))
+         {
+            erpIdList.add(info.getFitemid());
+         }
+      }
+      if(!erpIdList.contains(bo.getFitemid()))
+      {
+         erpIdList.add(bo.getFitemid());
+      }
+   }
+   String hqlForMbbBd="select t.erpId,t from MbbBdMrl t where t.isDelete=0 and ";
+   hqlForMbbBd+=QueryUtil.getSQLInParamsSplit("t.erpId", 999, erpIdList);
+   Map<String, MbbBdMrl> map = (Map<String, MbbBdMrl>) this.dao.createQuery(hqlForMbbBd)
+         .setResultTransformer(new MapResultTransformer<String, MbbBdMrl>()).uniqueResult();
+   try {
+      
+      for(BomBillInfo bo:boList)
+      {
+         if(ignoreList.contains(bo.getFbomnumber()))
+         {
+            continue;
+         }
+         //物料的内码
+         String faMrlErpId=bo.getFitemid();
+         List<BomEntityinfo> infoList=bo.getEntityData().getEntityinfo();
+         List<Map<String, Object>> rowDatas=new ArrayList<Map<String,Object>>();
+         for(BomEntityinfo info:infoList)
+         {
+            Map<String, Object> rowData=new HashMap<String, Object>();
+            rowData.put("id", "");
+            rowData.put("optionalTypeGid", "");
+            rowData.put("qana", info.getFqty());
+            if(map.get(info.getFitemid())==null)
+            {
+               throw new MestarException("物料内码"+info.getFitemid()+"在mes不存在!");
+            }
+            rowData.put("sitm", map.get(info.getFitemid()).getCode());
+            rowData.put("opKind", 1);
+            rowData.put("isVirtual", 0);
+            rowData.put("isResolve", 0);
+            rowData.put("labExcel", "01");
+            rowData.put("optionalTypeFlag", 1);
+            rowData.put("erpId", info.getFentryid());
+            rowData.put("erpWorkCell", info.getFmachinepos());
+            rowData.put("isBond", info.getFnote());
+            rowData.put("isAudit", bo.getFstatus());
+            if("使用".equals(bo.getFusestate()))
+            {
+               //使用
+               rowData.put("useState", "1");
+            }else if(StringUtils.isEmpty(bo.getFusestate()))
+            {
+               //未使用
+               throw new MestarException("字段fusestate为空!");
+            }else{
+               rowData.put("useState", "0");
+            }
+            if("虚拟件".equals(info.getFmaterieltypename()))
+            {
+               rowData.put("isNotReal", 1);
+            }else{
+               rowData.put("isNotReal", 0);
+            }
+            MestarLogger.info("fmaterieltypename:"+info.getFmaterieltypename());
+            if(map.get(faMrlErpId)==null)
+            {
+               throw new MestarException("物料内码"+faMrlErpId+"在mes不存在!");
+            }
+            rowData.put("mitm", map.get(faMrlErpId).getCode());
+            rowData.put("erpBomCode",bo.getFbomnumber());
+            rowDatas.add(rowData);
+         }
+         umppSysnPlanOrderService.toSaveRowDatas(rowDatas,"",bo.getFbomnumber());
+      }
+   } catch (Exception e) {
+      throw new MestarException(e.getMessage());
+   }
+}
+
+public void toSaveRowDatas(List<Map<String, Object>> rowDatas, String mitm, String ver)
+{
+    if(rowDatas==null||rowDatas.size()==0)
+    {
+        throw new MestarException("没有需要同步的数据！");
+    }
+    //查询物料是否存在
+    Set<String> sitmSet = Sets.newHashSet();
+    String erpBomCode=rowDatas.get(0).get("erpBomCode").toString();
+    for (Map<String, Object> rowData_el : rowDatas)
+    {
+        String sitm=rowData_el.get("sitm").toString();
+        sitmSet.add(sitm);
+        
+        String mitm_erp=rowData_el.get("mitm").toString();
+        
+        if(StringUtils.isBlank(mitm))
+        {//父项物料
+            mitm=mitm_erp;
+        }else if(!(mitm.equals(mitm_erp)))
+        {
+           //这里这种情况基本不存在
+            throw new  MestarException("根据erpBom号["+ver+"]从erp获取的数据中，存在多个父物料["+mitm+"、"+mitm_erp+"]！");
+        }
+        
+    }
+    sitmSet.add(mitm);
+    List<String> sitms=Lists.newArrayList(sitmSet);
+    Map<String,MbbBdMrl> bdMrl_cache_map = cmUtilService.getEntityCacheMap(sitms, "code",MbbBdMrl.class,null,false);
+    if(bdMrl_cache_map==null)
+    {
+        bdMrl_cache_map=Maps.newHashMap();
+    }
+ 
+    //组合数据
+    //主
+    Map<String,Object> mainData = Maps.newHashMap();
+    mainData.put("sitm", mitm);
+    mainData.put("ver", "1");
+    mainData.put("sitmName", bdMrl_cache_map.get(mitm)==null?"":bdMrl_cache_map.get(mitm).getName());
+    mainData.put("erpBomCode", erpBomCode);
+    //辅
+    for (Map<String, Object> rowData_el : rowDatas)
+    {
+        String sitm = rowData_el.get("sitm").toString();
+        MbbBdMrl mrl = bdMrl_cache_map.get(sitm);
+        if(mrl==null)
+        {
+            throw new MestarException("物料{"+sitm+"}在系统中未找到！");
+        }
+        rowData_el.put("sitmName", mrl.getName());
+        if(rowData_el.get("isCritical")==null)
+        {
+            rowData_el.put("isCritical", mrl.getIsCritical());
+        }
+    }
+    
+    String formData=JSON.toJSONString(mainData);
+        BomBO bomBO = (BomBO) JSONUtil.readJSON2Bean(formData, BomBO.class);
+    if(StringUtils.isNotEmpty(bomBO.getErpWorkCell()))
+    {
+        System.out.println("1");
+    }
+    String gridData=JSON.toJSONString(rowDatas);
+    List<BomBO> subBomBOList = (List<BomBO>) JSONUtil.readJSON2List(gridData, BomBO.class);
+
+    //查询已存在的
+    String code=bomBO.getSitm() + "_V" + bomBO.getVer();
+    List<BomBO> subBom = this.ummdBomService.getBomBOByBomCode(erpBomCode, "DEFAULT", BomConstantUtil.BOM_STATE_Y);
+    Map<String,List<BomBO>> erpId_bomList=new HashMap<String, List<BomBO>>();
+    for(BomBO bo:subBom)
+    {
+        if(erpId_bomList.containsKey(bo.getErpId()))
+        {
+            erpId_bomList.get(bo.getErpId()).add(bo);
+        }else{
+            List<BomBO> boList=new ArrayList<BomBO>();
+            boList.add(bo);
+            erpId_bomList.put(bo.getErpId(),boList);
+        }
+    }
+    List<String> removeDataList=Lists.newArrayList();
+    List<BomBO> coloneList=new ArrayList<BomBO>();
+    for(Entry<String,List<BomBO>> entry:erpId_bomList.entrySet())
+    {
+       //系统数据
+        String sitm=entry.getKey();
+        boolean isRemove=true;//是否移除
+        for (BomBO subBomBO_el : subBomBOList)
+        {//接口数据
+            String sitm_i=subBomBO_el.getErpId();
+            if(sitm==null)
+            {
+               throw new MestarException("数据库存在erpid为空的数据!");
+            }
+            if((sitm).equals(sitm_i))
+            {
+               //MES和接口如果子物料相同，判断
+               if(entry.getValue().size()==1)
+               {
+                  //MES中只有一个，是修改这个子物料BOM
+                  subBomBO_el.setId(entry.getValue().get(0).getId());//标记为修改
+               }else{
+                  //MES中这个子物料有多个
+                  if(!entry.getValue().get(0).getSitm().equals(subBomBO_el.getSitm()))
+                  {
+                     throw new MestarException("物料在mes已经进行拆分,而erp内此记录的物料代码被修改,目前不允许此情况!");
+                  }else{
+                     //进行数量对比
+                     BigDecimal total=new BigDecimal("0");
+                     for(BomBO tempData:entry.getValue())
+                     {
+                        //MES的数量之和
+                        total=total.add(tempData.getQana());
+                     }
+                     if(total.compareTo(subBomBO_el.getQana())==0)
+                     {
+                        //数量相同
+                        
+                        //词条记录不用修改
+                        List<BomBO> hasSplitBoList=entry.getValue();
+                        subBomBO_el.setQana(hasSplitBoList.get(0).getQana());
+                        subBomBO_el.setId(hasSplitBoList.get(0).getId());
+                        for(int i=1;i<hasSplitBoList.size();i++)
+                        {
+                           BomBO newBo=(BomBO) subBomBO_el.clone();
+                           newBo.setQana(hasSplitBoList.get(i).getQana());
+                           newBo.setId(hasSplitBoList.get(i).getId());
+                           coloneList.add(newBo);
+                        }
+                     }else{
+                        
+                        if(total.compareTo(subBomBO_el.getQana())<0)
+                        {
+                           //MES中的数量小于ERP数量
+                           
+                           //数量增加 挑第一个加上去
+                           BigDecimal left= subBomBO_el.getQana() .subtract(total);
+                           List<BomBO> hasSplitBoList=entry.getValue();
+                            subBomBO_el.setQana(hasSplitBoList.get(0).getQana().add(left));
+                            subBomBO_el.setId(hasSplitBoList.get(0).getId());
+                            for(int i=1;i<hasSplitBoList.size();i++)
+                            {
+                               BomBO newBo=(BomBO) subBomBO_el.clone();
+                               newBo.setQana(hasSplitBoList.get(i).getQana());
+                               newBo.setId(hasSplitBoList.get(i).getId());
+                               coloneList.add(newBo);
+                            }
+                        }else{
+                           //数量
+                           BigDecimal oldValue=subBomBO_el.getQana();
+                           List<BomBO> ttList=new ArrayList<BomBO>();
+                           //数量减少
+                           BigDecimal left=total .subtract(subBomBO_el.getQana());
+                           //先把对象复制出来
+                           List<BomBO> hasSplitBoList=entry.getValue();
+                            subBomBO_el.setQana(hasSplitBoList.get(0).getQana());
+                            subBomBO_el.setId(hasSplitBoList.get(0).getId());
+                            ttList.add(subBomBO_el);
+                            for(int i=1;i<hasSplitBoList.size();i++)
+                            {
+                               BomBO newBo=(BomBO) subBomBO_el.clone();
+                               newBo.setQana(hasSplitBoList.get(i).getQana());
+                               newBo.setId(hasSplitBoList.get(i).getId());
+                               coloneList.add(newBo);
+                               ttList.add(newBo);
+                            }
+                            //判断哪个值可以减少
+                            boolean canSub=false;
+                            for(BomBO ttBo: ttList)
+                            {
+                               if(ttBo.getQana().compareTo(left)==1)
+                               {
+                                  ttBo.setQana(ttBo.getQana().subtract(left));
+                                  canSub=true;
+                                  break;
+                               }
+                            }
+                            if(!canSub)
+                            {
+                               throw new MestarException("bom原数量和为"+total.toString()+"现在改为"+oldValue.toString()+"系统无法自动分配,请修改bom值后重试!");
+                            }
+                        }
+                     }
+                  }
+               }
+               //存在
+                isRemove=false;
+                break;
+            
+            }
+        }
+        if(isRemove)
+        {
+           for(BomBO tempData:entry.getValue())
+           {
+              removeDataList.add(tempData.getId());
+           }
+        }
+    }
+    if(coloneList.size()>0)
+    {
+       subBomBOList.addAll(coloneList);
+    }
+    // 保存
+    ummdBomService.saveBom(bomBO, subBomBOList, removeDataList);
+    
+}
+
+
+public void saveBom(BomBO bomBO, List<BomBO> subBomBOList, List<String> removeDataList)
+    {
+        List<Bom> saveBoms = new ArrayList<Bom>();
+        List<String> mrlCodeList=new ArrayList<String>();
+        for (BomBO bo : subBomBOList)
+        {
+           if(!mrlCodeList.contains(bo.getSitm()))
+           {
+              mrlCodeList.add(bo.getSitm());
+           }
+        }
+        if(mrlCodeList.size()==0)
+        {
+           throw new MestarException("未获取到前台传递的数据!");
+        }
+        //批量查询物料
+        String hqlForMrl=" from MbbBdMrl t where t.isDelete=0 and t.code in :codeList  ";
+        List<MbbBdMrl> mrlList=this.dao.getCurrentSession().createQuery(hqlForMrl).setParameterList("codeList", mrlCodeList).list();
+        Map<String,MbbBdMrl> code_entity=new HashMap<String, MbbBdMrl>();
+        for(MbbBdMrl bd:mrlList)
+        {
+           code_entity.put(bd.getCode(), bd);
+        }
+        for (BomBO bo : subBomBOList)
+        {
+            Bom bom = new Bom();
+            if (bo.getId() != null && !"".equals(bo.getId()))
+            {
+                bom = this.getDao().get(Bom.class, bo.getId());
+            }
+            bom.setMitm(bomBO.getSitm());
+            bom.setErpWorkCell(bo.getErpWorkCell());
+            bom.setCode(bomBO.getSitm() + "_V" + bomBO.getVer());
+            bom.setVer(bomBO.getVer());
+            bom.setOpKind(bo.getOpKind());
+            bom.setSitm(bo.getSitm());
+            bom.setQana(bo.getQana());
+            bom.setErpId(bo.getErpId());
+//            bom.setIsNotReal(bo.getIsNotReal());
+            if(StringUtils.isEmpty(bo.getErpBomCode()))
+            {
+               throw new MestarException("111");
+            }
+            //20210516优化
+            bom.setUseState(bo.getUseState());
+            bom.setIsBond(bo.getIsBond());
+            bom.setIsAudit(bo.getIsAudit());
+            bom.setIsDelete(0);
+            bom.setErpBomCode(bo.getErpBomCode());
+            // bom保存工序由实体工序改为模板工序
+            // MbfRouteOperation operation =
+            // this.getDao().get(MbfRouteOperation.class, bo.getRouteOperGid());
+            if(StringUtils.isNotBlank(bo.getRouteOperGid()))
+            {
+               MbfDefOperation operation = this.getDao().get(MbfDefOperation.class, bo.getRouteOperGid());
+               bom.setRouteOper(operation);
+               bom.setOpCode(operation.getDefOpCode());
+               bom.setOpName(operation.getDefOpName());
+            }
+            MbbBdMrl mrl=code_entity.get(bo.getSitm());
+            if(mrl==null)
+            {
+               throw new MestarException("物料["+bo.getSitm()+"]在物料管理档案未查询到!");
+            }
+            if(mrl.getControlCode()==4&&bo.getIsCritical()==1)
+            {
+               throw new MestarException("物料["+mrl.getCode()+"]在物料管理档案为标准件,不允许进行关键件采集!");
+            }
+            if(bom.getIsCritical()==null){
+               //20210520-修改操作，BOM关键件为空，才赋值
+               if(bo.getIsCritical()!=null)
+                {
+                   
+                   bom.setIsCritical(bo.getIsCritical());
+                }else {
+                   //20210520-默认为:否
+                   bom.setIsCritical(0);
+                }
+            }
+            
+            bom.setIsResolve(bo.getIsResolve());
+            bom.setIsVirtual(bo.getIsVirtual());
+            if(bo.getOptionalTypeGid()!=null){
+                bom.setOptionalType(this.getDao().get(UmmOpionalType.class, bo.getOptionalTypeGid()));
+            }
+            bom.setRemark(bo.getRemark());
+            bom.setNextCode(StringUtils.isBlank(bo.getNextCode()) ? null : bo.getNextCode());
+            bom.setEndFlag(BomConstantUtil.BOM_END_FLAG_YES);
+            bom.setIsEnable(BomConstantUtil.BOM_STATE_N);
+            bom.setIsEdit(BomConstantUtil.BOM_STATE_Y);
+            bom.setIsPublish(BomConstantUtil.ISCRITICAL_NO);
+            bom.setIsDefault(BomConstantUtil.BOM_STATE_Y);
+            bom.setLabExcel(bo.getLabExcel());
+            saveBoms.add(bom);
+        }
+        if (removeDataList.size() > 0)
+        {
+            deleteBom(removeDataList);
+        }
+        this.getDao().saveAll(saveBoms);
+
+    }
